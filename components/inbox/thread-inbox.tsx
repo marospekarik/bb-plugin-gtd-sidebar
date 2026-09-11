@@ -88,7 +88,7 @@ export function ThreadInbox({
   const gitButlerLabels = useGitButlerLabels(threads);
 
   const [showSnoozed, setShowSnoozed] = useState(false);
-  const [showSettled, setShowSettled] = useState(true);
+  const [showSettled, setShowSettled] = useState(false);
   // Waiting is the one active shelf worth folding away: its rows are work you
   // cannot act on, and they can outnumber Next Action several times over.
   const [showWaiting, setShowWaiting] = useState(true);
