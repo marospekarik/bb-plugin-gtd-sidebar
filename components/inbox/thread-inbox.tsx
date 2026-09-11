@@ -212,7 +212,7 @@ export function ThreadInbox({
           searchQuery={searchQuery}
         >
           {/* The shelves you must not miss — pinned to the top of the list and
-              sticky, so a raised hand or a freshly settled thread never needs
+              sticky, so a raised hand or a freshly finished thread never needs
               scrolling to find. Everything else scrolls beneath them. */}
           <div className="gtd-sticky-band">
             {awaitRows.length > 0 ? (
@@ -225,22 +225,13 @@ export function ThreadInbox({
               </Shelf>
             ) : null}
             {doneRows.length > 0 ? (
-              <ParkedShelf
-                compactThreads={compactThreads}
-                providerInfoById={providerInfoById}
-                projectNameById={projectNameById}
-                gitButlerLabels={gitButlerLabels}
+              <Shelf
                 label="Done"
-                shelf="settled"
-                threads={doneRows.map((row) => row.node.thread)}
-                expanded={showSettled || searching}
-                onToggle={() => setShowSettled((open) => !open)}
-                activeThreadId={activeThreadId}
-                wakeAtFor={() => null}
+                count={doneRows.length}
                 isCompactViewport={isCompactViewport}
-                command={command}
-                now={now}
-              />
+              >
+                {doneRows.map((row) => cardFor(row, "done"))}
+              </Shelf>
             ) : null}
           </div>
           {activeShelves.map(([shelf, label, shelfThreads]) =>
@@ -273,6 +264,22 @@ export function ThreadInbox({
             onToggle={() => setShowSnoozed((open) => !open)}
             activeThreadId={activeThreadId}
             wakeAtFor={lifecycle.wakeAtFor}
+            isCompactViewport={isCompactViewport}
+            command={command}
+            now={now}
+          />
+          <ParkedShelf
+            compactThreads={compactThreads}
+            providerInfoById={providerInfoById}
+            projectNameById={projectNameById}
+            gitButlerLabels={gitButlerLabels}
+            label="Settled"
+            shelf="settled"
+            threads={shelves.settled.map((row) => row.node.thread)}
+            expanded={showSettled || searching}
+            onToggle={() => setShowSettled((open) => !open)}
+            activeThreadId={activeThreadId}
+            wakeAtFor={() => null}
             isCompactViewport={isCompactViewport}
             command={command}
             now={now}
@@ -391,8 +398,9 @@ function useInboxTree(
       nextAction: rows("nextAction"),
       waiting: rows("waiting"),
       snoozed: rows("snoozed"),
-      done: rows("done"),
+      settled: rows("settled"),
       await: rows("await"),
+      done: rows("done"),
     };
   }, [collapsedThreads, searchQuery, tree]);
   return { shelves, toggleThread };

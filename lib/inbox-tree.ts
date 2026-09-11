@@ -8,7 +8,8 @@ export type InboxShelf =
   | "pinned"
   | "nextAction"
   | "waiting"
-  | "snoozed";
+  | "snoozed"
+  | "settled";
 
 export interface InboxThreadNode {
   thread: PluginSidebarThread;
@@ -42,13 +43,28 @@ function statusPriority(thread: PluginSidebarThread): number {
   return 0;
 }
 
+/**
+ * Whether an active thread has just finished and produced output the user has
+ * not read yet. "Done" is a Next Action that has landed its answer — the
+ * thread bb marks `unread-success`, or simply unread. A failure or a raised
+ * hand is never "done".
+ */
+function hasProducedOutput(thread: PluginSidebarThread): boolean {
+  if (thread.indicator === "unread-success") return true;
+  if (thread.indicator === "unread-error" || thread.hasPendingInteraction) return false;
+  return thread.isUnread;
+}
+
 function ownShelf(thread: PluginSidebarThread, lifecycle: InboxLifecycle): InboxShelf {
-  if (lifecycle === "settled") return "done";
+  if (lifecycle === "settled") return "settled";
   if (lifecycle !== "active") return lifecycle;
   // A raised hand outranks even a manual pin: the thread is a live question,
   // and the whole point of the sticky shelf is that you never have to look
   // for it.
   if (thread.hasPendingInteraction || thread.indicator === "waiting-for-input") return "await";
+  // Done: the run finished and its output is waiting for you. Only ever a
+  // Next Action — work that is still running has not produced anything.
+  if (activeSectionFor(thread) === "next-action" && hasProducedOutput(thread)) return "done";
   if (thread.isPinned) return "pinned";
   return activeSectionFor(thread) === "next-action" ? "nextAction" : "waiting";
 }
@@ -121,6 +137,9 @@ function aggregateFamilies(roots: readonly InboxThreadNode[]): void {
       // strongest signal a sidebar can carry, and it rises the whole family
       // into the sticky shelf.
       if (child.shelf === "await") node.shelf = "await";
+      // A finished child rises its family the same way a waiting parent
+      // rises for a plain next-action child — its output has landed.
+      else if (node.shelf === "waiting" && child.shelf === "done") node.shelf = "done";
       else if (child.shelf === "pinned") node.shelf = "pinned";
       else if (
         node.shelf === "waiting" &&
@@ -139,15 +158,16 @@ function aggregateFamilies(roots: readonly InboxThreadNode[]): void {
 function familyComparator() {
   const shelfOrder: Record<InboxShelf, number> = {
     await: 0,
-    pinned: 1,
-    nextAction: 2,
-    waiting: 3,
-    done: 4,
+    done: 1,
+    pinned: 2,
+    nextAction: 3,
+    waiting: 4,
     snoozed: 5,
+    settled: 6,
   };
   return (a: InboxThreadNode, b: InboxThreadNode) => {
     if (a.shelf !== b.shelf) return shelfOrder[a.shelf] - shelfOrder[b.shelf];
-    if (a.shelf === "done" && b.shelf === "done") return 0;
+    if (a.shelf === "settled" && b.shelf === "settled") return 0;
     const clock = a.shelf === "waiting" && b.shelf === "waiting" ? "updatedAt" : "attentionAt";
     return (
       b[clock] - a[clock] ||

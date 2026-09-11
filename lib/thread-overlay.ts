@@ -19,15 +19,15 @@ export const OVERLAY_TONE_CLASS: Record<ThreadOverlayTone, string> = {
  *
  * "Await" is the one state that must outrank everything else: a raised hand
  * is a live question, and the list already routes it to the top shelf, so its
- * tint should agree. "Done" is an archived thread still on the shelf (the
- * undo window) — a finished state, shown gently. Everything else draws no
- * overlay: the row's normal background is already the neutral resting state.
+ * tint should agree. "Done" is a thread whose run has landed and produced
+ * output — a finished, answer-waiting state, shown in soft sage. Everything
+ * else draws no overlay: the row's normal background is already the neutral
+ * resting state.
  */
 export function overlayForShelf(shelf: string): ThreadOverlayTone {
   switch (shelf) {
     case "await":
       return "await";
-    case "settled":
     case "done":
       return "done";
     default:

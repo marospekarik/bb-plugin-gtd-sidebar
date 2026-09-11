@@ -235,10 +235,9 @@ describe("inbox families", () => {
       [
         ["active-child", "active"],
         ["root", "active"],
-        // "Done" (an archived thread) renders in the sticky band above the
-        // parked Snoozed shelf, so it sorts before a snoozed thread.
-        ["settled", "settled"],
+        // Parked shelves sort after active work: Snoozed, then Settled.
         ["snoozed", "snoozed"],
+        ["settled", "settled"],
       ],
     );
   });
@@ -343,7 +342,26 @@ describe("inbox families", () => {
     assert.equal(tree[1]?.shelf, "pinned");
   });
 
-  it("labels archived threads as done and keeps their relative order", () => {
+  it("calls a finished, unread next-action thread done", () => {
+    const tree = buildInboxTree(
+      [
+        thread({ id: "quiet", latestAttentionAt: 900 }),
+        thread({
+          id: "finished",
+          indicator: "unread-success",
+          isUnread: true,
+          latestAttentionAt: 100,
+        }),
+      ],
+      active,
+    );
+    assert.equal(tree[0]?.shelf, "done");
+    assert.equal(tree[1]?.shelf, "nextAction");
+    // "Done" leads the list — it is the output waiting for you.
+    assert.deepEqual(ids(visibleInboxRows(tree, new Set())), ["finished", "quiet"]);
+  });
+
+  it("labels archived threads as settled, not done", () => {
     const tree = buildInboxTree(
       [
         thread({ id: "settled-first", isArchived: true, latestAttentionAt: 1 }),
@@ -354,7 +372,7 @@ describe("inbox families", () => {
     );
     assert.deepEqual(
       tree.filter((node) => node.lifecycle === "settled").map((node) => node.shelf),
-      ["done", "done"],
+      ["settled", "settled"],
     );
     assert.deepEqual(tree.map((node) => node.thread.id), ["active", "settled-first", "settled-second"]);
   });

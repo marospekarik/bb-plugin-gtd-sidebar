@@ -1,6 +1,6 @@
 import type { IconName } from "@/components/ui/icon";
 
-export type ActiveThreadShelf = "pinned" | "nextAction" | "waiting" | "await";
+export type ActiveThreadShelf = "pinned" | "nextAction" | "waiting" | "await" | "done";
 
 export type RowCommand =
   | {
