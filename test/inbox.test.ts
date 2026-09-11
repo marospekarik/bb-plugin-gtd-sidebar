@@ -1,0 +1,379 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import type { PluginSidebarThread } from "@get-bb/plugin-sdk";
+import { buildInboxTree, visibleInboxRows } from "../lib/inbox-tree.ts";
+import {
+  activeSectionFor,
+  childrenOf,
+  filterByProject,
+  nextThreadIdAfterSettle,
+  parentOf,
+  threadDisplayTitle,
+} from "../lib/inbox.ts";
+
+function thread(overrides: Partial<PluginSidebarThread> = {}): PluginSidebarThread {
+  return {
+    id: "thr_1",
+    projectId: "proj_1",
+    title: "A thread",
+    titleFallback: null,
+    parentThreadId: null,
+    sectionId: null,
+    originKind: null,
+    originPluginId: null,
+    providerId: "codex",
+    hasPendingInteraction: false,
+    activity: {
+      workflows: 0,
+      backgroundAgents: 0,
+      backgroundCommands: 0,
+      planMode: 0,
+      goals: 0,
+    },
+    indicator: "none",
+    indicatorLabel: null,
+    isUnread: false,
+    isPinned: false,
+    isArchived: false,
+    environment: null,
+    host: null,
+    createdAt: 100,
+    updatedAt: 100,
+    lastReadAt: 100,
+    latestAttentionAt: 100,
+    ...overrides,
+  };
+}
+
+describe("active sections", () => {
+  it("puts quiet work with the user and live work in waiting", () => {
+    assert.equal(activeSectionFor(thread()), "next-action");
+    assert.equal(activeSectionFor(thread({ indicator: "runtime" })), "waiting");
+    assert.equal(
+      activeSectionFor(
+        thread({
+          activity: {
+            workflows: 0,
+            backgroundAgents: 0,
+            backgroundCommands: 1,
+            planMode: 0,
+            goals: 0,
+          },
+        }),
+      ),
+      "waiting",
+    );
+  });
+
+  it("puts a pending interaction in next action even with live work", () => {
+    assert.equal(
+      activeSectionFor(
+        thread({
+          hasPendingInteraction: true,
+          activity: {
+            workflows: 1,
+            backgroundAgents: 0,
+            backgroundCommands: 0,
+            planMode: 0,
+            goals: 0,
+          },
+        }),
+      ),
+      "next-action",
+    );
+  });
+});
+
+describe("threadDisplayTitle", () => {
+  it("prefers the title, then the fallback, then a placeholder", () => {
+    assert.equal(threadDisplayTitle(thread({ title: "Real" })), "Real");
+    assert.equal(
+      threadDisplayTitle(thread({ title: null, titleFallback: "Fallback" })),
+      "Fallback",
+    );
+    assert.equal(
+      threadDisplayTitle(thread({ title: null, titleFallback: null })),
+      "Untitled thread",
+    );
+  });
+
+  it("treats a whitespace-only title as absent", () => {
+    assert.equal(
+      threadDisplayTitle(thread({ title: "   ", titleFallback: "Fallback" })),
+      "Fallback",
+    );
+  });
+});
+
+describe("filtering", () => {
+  it("scopes to one project, or to all", () => {
+    const threads = [thread({ id: "a", projectId: "p1" }), thread({ id: "b", projectId: "p2" })];
+    assert.deepEqual(
+      filterByProject(threads, "p1").map((t) => t.id),
+      ["a"],
+    );
+    assert.equal(filterByProject(threads, null).length, 2);
+  });
+});
+
+describe("nextThreadIdAfterSettle", () => {
+  const section = [thread({ id: "a" }), thread({ id: "b" }), thread({ id: "c" })];
+
+  it("moves a focused thread to the row below it", () => {
+    assert.equal(nextThreadIdAfterSettle(section, "b", "b"), "c");
+  });
+
+  it("falls back to the row above when settling the final row", () => {
+    assert.equal(nextThreadIdAfterSettle(section, "c", "c"), "b");
+  });
+
+  it("does not move focus when settling an unfocused thread", () => {
+    assert.equal(nextThreadIdAfterSettle(section, "b", "a"), null);
+  });
+
+  it("returns no target when the section has no adjacent row", () => {
+    assert.equal(nextThreadIdAfterSettle([thread({ id: "only" })], "only", "only"), null);
+  });
+});
+
+describe("child threads", () => {
+  it("lists a thread's children oldest first", () => {
+    const children = childrenOf(
+      [
+        thread({ id: "parent" }),
+        thread({ id: "b", parentThreadId: "parent", createdAt: 20 }),
+        thread({ id: "a", parentThreadId: "parent", createdAt: 10 }),
+        thread({ id: "other", parentThreadId: "elsewhere" }),
+      ],
+      "parent",
+    );
+    assert.deepEqual(
+      children.map((t) => t.id),
+      ["a", "b"],
+    );
+  });
+});
+
+describe("parentOf", () => {
+  // The list hides an archived parent, but the child's header must still get
+  // it back — otherwise the child is a dead end.
+  it("finds a parent the inbox filters out", () => {
+    const parent = parentOf(
+      [
+        thread({ id: "parent", isArchived: true, projectId: "other" }),
+        thread({ id: "child", parentThreadId: "parent" }),
+      ],
+      "child",
+    );
+    assert.equal(parent?.id, "parent");
+  });
+
+  it("returns null for a root thread", () => {
+    assert.equal(parentOf([thread({ id: "root" })], "root"), null);
+  });
+
+  it("returns null when the parent row is gone", () => {
+    const threads = [thread({ id: "child", parentThreadId: "deleted" })];
+    assert.equal(parentOf(threads, "child"), null);
+  });
+});
+
+describe("inbox families", () => {
+  const active = () => "active" as const;
+  const ids = (rows: ReturnType<typeof visibleInboxRows>) => rows.map((row) => row.node.thread.id);
+
+  it("renders nested preorder and only advances through expanded rows", () => {
+    const tree = buildInboxTree(
+      [
+        thread({ id: "root" }),
+        thread({ id: "child", parentThreadId: "root", createdAt: 101 }),
+        thread({ id: "grandchild", parentThreadId: "child" }),
+        thread({ id: "sibling", parentThreadId: "root", createdAt: 102 }),
+      ],
+      active,
+    );
+    const open = visibleInboxRows(tree, new Set());
+    assert.deepEqual(ids(open), ["root", "child", "grandchild", "sibling"]);
+    assert.deepEqual(
+      open.map((row) => row.depth),
+      [0, 1, 2, 1],
+    );
+    assert.deepEqual(
+      open.map((row) => [row.guides, row.lastChild]),
+      [
+        ["", false],
+        ["", false],
+        ["1", true],
+        ["", true],
+      ],
+    );
+    const collapsed = visibleInboxRows(tree, new Set(["child"]));
+    assert.deepEqual(ids(collapsed), ["root", "child", "sibling"]);
+    assert.equal(
+      nextThreadIdAfterSettle(
+        collapsed.map((row) => row.node.thread),
+        "child",
+        "child",
+      ),
+      "sibling",
+    );
+  });
+
+  it("detaches parked children and active children of parked parents", () => {
+    const tree = buildInboxTree(
+      [
+        thread({ id: "root" }),
+        thread({ id: "snoozed", parentThreadId: "root" }),
+        thread({ id: "settled", parentThreadId: "root", isArchived: true }),
+        thread({ id: "active-child", parentThreadId: "settled" }),
+      ],
+      (item) => (item.id === "snoozed" ? "snoozed" : "active"),
+    );
+    assert.equal(tree.length, 4);
+    assert.deepEqual(
+      tree.map((node) => [node.thread.id, node.lifecycle]),
+      [
+        ["active-child", "active"],
+        ["root", "active"],
+        // "Done" (an archived thread) renders in the sticky band above the
+        // parked Snoozed shelf, so it sorts before a snoozed thread.
+        ["settled", "settled"],
+        ["snoozed", "snoozed"],
+      ],
+    );
+  });
+
+  it("keeps forks and orphans reachable and breaks cycles", () => {
+    const input = [
+      thread({ id: "root" }),
+      thread({ id: "fork", originKind: "fork", parentThreadId: "root" }),
+      thread({ id: "orphan", parentThreadId: "missing" }),
+      thread({ id: "a", parentThreadId: "b" }),
+      thread({ id: "b", parentThreadId: "a" }),
+      thread({ id: "self", parentThreadId: "self" }),
+    ];
+    const tree = buildInboxTree(input, active);
+    const rows = visibleInboxRows(tree, new Set());
+    assert.equal(rows.length, input.length);
+    assert.equal(new Set(ids(rows)).size, input.length);
+    assert.equal(rows.find((row) => row.node.thread.id === "fork")?.depth, 0);
+    assert.equal(parentOf(input, "fork"), null);
+    assert.deepEqual(childrenOf(input, "root"), []);
+  });
+
+  it("promotes a working family for hidden descendant attention", () => {
+    const root = thread({ id: "root", indicator: "runtime" });
+    const child = thread({
+      id: "child",
+      parentThreadId: "root",
+      indicator: "runtime",
+      isUnread: true,
+    });
+    const tree = buildInboxTree([root, child], active);
+    assert.equal(tree[0]?.shelf, "nextAction");
+    assert.equal(visibleInboxRows(tree, new Set(["root"]))[0]?.statusThread, child);
+    assert.equal(visibleInboxRows(tree, new Set())[0]?.statusThread, root);
+    assert.equal(tree[0]?.lifecycle, "active");
+  });
+
+  it("keeps a family pinned when a descendant is pinned", () => {
+    const tree = buildInboxTree(
+      [
+        thread({ id: "other", latestAttentionAt: 900 }),
+        thread({ id: "root", indicator: "runtime" }),
+        thread({ id: "child", parentThreadId: "root", isPinned: true }),
+      ],
+      active,
+    );
+    assert.deepEqual(ids(visibleInboxRows(tree, new Set())), ["root", "child", "other"]);
+    assert.equal(tree[0]?.shelf, "pinned");
+    assert.equal(tree[0]?.thread.isPinned, false);
+  });
+
+  it("reveals matching descendants with ancestors and preserves a matching parent's family", () => {
+    const input = [
+      thread({ id: "root", title: "Project" }),
+      thread({ id: "child", title: null, titleFallback: "Needle", parentThreadId: "root" }),
+      thread({ id: "sibling", title: "Elsewhere", parentThreadId: "root" }),
+    ];
+    assert.deepEqual(
+      ids(
+        visibleInboxRows(buildInboxTree(input, active, " NEEDLE "), new Set(["root"]), " NEEDLE "),
+      ),
+      ["root", "child"],
+    );
+    assert.deepEqual(
+      ids(visibleInboxRows(buildInboxTree(input, active, "project"), new Set(["root"]), "project")),
+      ["root", "child", "sibling"],
+    );
+    assert.deepEqual(
+      ids(visibleInboxRows(buildInboxTree(input, active, "   "), new Set(), "   ")),
+      ["root", "child", "sibling"],
+    );
+  });
+
+  it("keeps stable creation and id ties without mutating the roster", () => {
+    for (const indicator of ["none", "runtime"] as const) {
+      const input = Object.freeze([
+        Object.freeze(thread({ id: "b", createdAt: 1, indicator })),
+        Object.freeze(thread({ id: "c", createdAt: 2, indicator })),
+        Object.freeze(thread({ id: "a", createdAt: 1, indicator })),
+      ]);
+      const tree = buildInboxTree(input, active);
+      assert.deepEqual(ids(visibleInboxRows(tree, new Set())), ["c", "a", "b"]);
+      assert.deepEqual(
+        input.map((item) => item.id),
+        ["b", "c", "a"],
+      );
+    }
+  });
+
+  it("lifts a pending interaction to the await shelf ahead of a pin", () => {
+    const tree = buildInboxTree(
+      [
+        thread({ id: "other", latestAttentionAt: 900 }),
+        thread({ id: "pinned", isPinned: true, latestAttentionAt: 1000 }),
+        thread({ id: "hand", hasPendingInteraction: true, latestAttentionAt: 50 }),
+      ],
+      active,
+    );
+    // The raised hand outranks the manual pin, so its family leads.
+    assert.deepEqual(ids(visibleInboxRows(tree, new Set())), ["hand", "pinned", "other"]);
+    assert.equal(tree[0]?.shelf, "await");
+    assert.equal(tree[1]?.shelf, "pinned");
+  });
+
+  it("labels archived threads as done and keeps their relative order", () => {
+    const tree = buildInboxTree(
+      [
+        thread({ id: "settled-first", isArchived: true, latestAttentionAt: 1 }),
+        thread({ id: "active" }),
+        thread({ id: "settled-second", isArchived: true, latestAttentionAt: 500 }),
+      ],
+      active,
+    );
+    assert.deepEqual(
+      tree.filter((node) => node.lifecycle === "settled").map((node) => node.shelf),
+      ["done", "done"],
+    );
+    assert.deepEqual(tree.map((node) => node.thread.id), ["active", "settled-first", "settled-second"]);
+  });
+
+  it("uses each shelf's clock while preserving settled order", () => {
+    const tree = buildInboxTree(
+      [
+        thread({ id: "waiting-old", indicator: "runtime", updatedAt: 10, latestAttentionAt: 1000 }),
+        thread({ id: "renamed", latestAttentionAt: 10, updatedAt: 900 }),
+        thread({ id: "active", latestAttentionAt: 50, updatedAt: 10 }),
+        thread({ id: "waiting-new", indicator: "runtime", updatedAt: 20, latestAttentionAt: 1 }),
+        thread({ id: "settled-first", isArchived: true, latestAttentionAt: 1 }),
+        thread({ id: "settled-second", isArchived: true, latestAttentionAt: 500 }),
+      ],
+      active,
+    );
+    assert.deepEqual(
+      tree.map((node) => node.thread.id),
+      ["active", "renamed", "waiting-new", "waiting-old", "settled-first", "settled-second"],
+    );
+  });
+});

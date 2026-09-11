@@ -1,0 +1,191 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import {
+  canPark,
+  nextWakeDelayMs,
+  refreshRetryDelayMs,
+  resolveShelf,
+  rowsMatch,
+  snoozeUntilTomorrow,
+  snoozeWakeLabel,
+  MAX_TIMEOUT_MS,
+  REFRESH_RETRY_DELAYS_MS,
+  type ThreadActivitySignals,
+  type ThreadLifecycleRow,
+} from "../lib/lifecycle.ts";
+
+const quiet: ThreadActivitySignals = {
+  hasPendingInteraction: false,
+  isWorking: false,
+  latestAttentionAt: 0,
+};
+
+const row = (overrides: Partial<ThreadLifecycleRow> = {}): ThreadLifecycleRow => ({
+  threadId: "thr_1",
+  snoozedUntil: null,
+  snoozedAt: null,
+  ...overrides,
+});
+
+describe("canPark", () => {
+  it("refuses while the agent is blocked on the user", () => {
+    assert.equal(canPark({ ...quiet, hasPendingInteraction: true }), false);
+  });
+
+  // The trap this whole feature has to avoid: bb has more kinds of live work
+  // than a session status, and parking any of them hides running work.
+  it("refuses while any work is running", () => {
+    assert.equal(canPark({ ...quiet, isWorking: true }), false);
+  });
+
+  it("allows a quiet thread", () => {
+    assert.equal(canPark(quiet), true);
+  });
+});
+
+describe("resolveShelf", () => {
+  it("keeps an unparked thread active", () => {
+    assert.equal(resolveShelf(undefined, quiet, 1_000), "active");
+  });
+
+  it("keeps a row with no snooze active", () => {
+    assert.equal(resolveShelf(row(), quiet, 1_000), "active");
+  });
+
+  it("keeps a snoozed thread hidden until its wake time", () => {
+    assert.equal(
+      resolveShelf(row({ snoozedUntil: 2_000, snoozedAt: 500 }), quiet, 1_000),
+      "snoozed",
+    );
+  });
+
+  it("wakes a snoozed thread when the timer elapses", () => {
+    assert.equal(resolveShelf(row({ snoozedUntil: 900, snoozedAt: 500 }), quiet, 1_000), "active");
+  });
+
+  // "Something happened" wakes it early — otherwise snooze hides the exact
+  // thing the user needed to see.
+  it("wakes a snoozed thread early when it raises its hand", () => {
+    assert.equal(
+      resolveShelf(
+        row({ snoozedUntil: 5_000, snoozedAt: 500 }),
+        { ...quiet, hasPendingInteraction: true },
+        1_000,
+      ),
+      "active",
+    );
+    assert.equal(
+      resolveShelf(
+        row({ snoozedUntil: 5_000, snoozedAt: 500 }),
+        { ...quiet, latestAttentionAt: 800 },
+        1_000,
+      ),
+      "active",
+    );
+  });
+
+  it("does not wake on activity that predates the snooze", () => {
+    assert.equal(
+      resolveShelf(
+        row({ snoozedUntil: 5_000, snoozedAt: 900 }),
+        { ...quiet, latestAttentionAt: 800 },
+        1_000,
+      ),
+      "snoozed",
+    );
+  });
+});
+
+describe("rowsMatch", () => {
+  const asMap = (rows: readonly ThreadLifecycleRow[]) =>
+    new Map(rows.map((entry) => [entry.threadId, entry]));
+
+  // A seeded list agrees with the response that follows it, and with every
+  // publish any window makes afterwards. Recognising that is what keeps a
+  // no-op refresh from re-partitioning the whole sidebar.
+  it("matches a list that says what the rows already say", () => {
+    const rows = [
+      row({ threadId: "a", snoozedUntil: 9_000, snoozedAt: 500 }),
+      row({ threadId: "b" }),
+    ];
+    assert.equal(rowsMatch(asMap(rows), [...rows].reverse()), true);
+  });
+
+  it("notices a timestamp that moved", () => {
+    assert.equal(
+      rowsMatch(asMap([row({ threadId: "a", snoozedUntil: 9_000, snoozedAt: 500 })]), [
+        row({ threadId: "a", snoozedUntil: 9_000, snoozedAt: 900 }),
+      ]),
+      false,
+    );
+  });
+
+  it("notices a row that arrived or left", () => {
+    assert.equal(rowsMatch(asMap([row({ threadId: "a" })]), []), false);
+    assert.equal(rowsMatch(asMap([row({ threadId: "a" })]), [row({ threadId: "b" })]), false);
+  });
+});
+
+describe("snoozeWakeLabel", () => {
+  it("rounds minutes up so a hidden thread never reads 0m", () => {
+    assert.equal(snoozeWakeLabel(1_000 + 1, 1_000), "1m");
+    assert.equal(snoozeWakeLabel(1_000 + 90_000, 1_000), "2m");
+  });
+
+  it("switches to hours and days", () => {
+    assert.equal(snoozeWakeLabel(1_000 + 2 * 3_600_000, 1_000), "2h");
+    assert.equal(snoozeWakeLabel(1_000 + 50 * 3_600_000, 1_000), "3d");
+  });
+
+  it("reads 'now' once the wake time has passed", () => {
+    assert.equal(snoozeWakeLabel(500, 1_000), "now");
+  });
+});
+
+describe("snoozeUntilTomorrow", () => {
+  // Calendar arithmetic, not +24h: a fixed offset lands on the wrong local
+  // day across a daylight-saving change.
+  it("lands at 9am on the next calendar day", () => {
+    const tomorrow = new Date(snoozeUntilTomorrow(new Date(2026, 0, 5, 23, 30, 0)));
+    assert.equal(tomorrow.getDate(), 6);
+    assert.equal(tomorrow.getHours(), 9);
+    assert.equal(tomorrow.getMinutes(), 0);
+  });
+});
+
+describe("nextWakeDelayMs", () => {
+  it("arms for the soonest upcoming wake", () => {
+    assert.equal(nextWakeDelayMs([5_000, 3_000, 9_000], 1_000), 2_050);
+  });
+
+  it("ignores wakes that have already passed", () => {
+    assert.equal(nextWakeDelayMs([500], 1_000), null);
+    assert.equal(nextWakeDelayMs([], 1_000), null);
+  });
+
+  // A far-future wake overflows setTimeout's signed 32-bit delay and fires
+  // immediately, turning one snooze into a tight re-arm loop.
+  it("clamps a far-future wake to the maximum timeout", () => {
+    assert.equal(nextWakeDelayMs([Number.MAX_SAFE_INTEGER], 0), MAX_TIMEOUT_MS);
+  });
+});
+
+describe("refreshRetryDelayMs", () => {
+  it("grows the wait with each attempt", () => {
+    const delays = REFRESH_RETRY_DELAYS_MS.map((_, attempt) => refreshRetryDelayMs(attempt));
+    assert.deepEqual(delays, [...REFRESH_RETRY_DELAYS_MS]);
+    assert.deepEqual(
+      [...delays].sort((left, right) => (left ?? 0) - (right ?? 0)),
+      delays,
+    );
+  });
+
+  // The bound is the point. A read that keeps asking forever would spend
+  // requests hiding a backend that is properly down, which the reconnect path
+  // already handles.
+  it("stops once the attempts are spent", () => {
+    assert.equal(refreshRetryDelayMs(REFRESH_RETRY_DELAYS_MS.length), null);
+    assert.equal(refreshRetryDelayMs(REFRESH_RETRY_DELAYS_MS.length + 10), null);
+    assert.equal(refreshRetryDelayMs(-1), null);
+  });
+});
