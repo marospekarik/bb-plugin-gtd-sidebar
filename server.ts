@@ -40,6 +40,18 @@ interface LifecycleDbRow {
 }
 
 const threadIdSchema = z.object({ threadId: z.string().trim().min(1) });
+const paperclipIssueSchema = z.object({
+  id: z.string(),
+  identifier: z.string().nullable(),
+  title: z.string(),
+  status: z.string(),
+  assigneeAgentName: z.string().nullable(),
+  live: z.boolean(),
+});
+const paperclipIssuesOutput = z.object({ issues: z.array(paperclipIssueSchema), updatedAt: z.string() });
+const paperclipProjectsOutput = z.object({
+  projects: z.array(z.object({ id: z.string(), name: z.string() })),
+});
 
 export const gtdSidebarRpcContract = defineRpcContract({
   listEnvironmentBranches: {
@@ -113,6 +125,11 @@ export const gtdSidebarRpcContract = defineRpcContract({
     output: z.object({ ok: z.boolean() }),
   },
   unsnooze: { input: threadIdSchema, output: z.object({ ok: z.boolean() }) },
+  paperclipIssues: {
+    input: z.object({ projectId: z.string().nullable(), query: z.string() }),
+    output: paperclipIssuesOutput,
+  },
+  paperclipProjects: { input: z.object({}), output: paperclipProjectsOutput },
   /** bb's unarchive. The thread comes back through the host's own view. */
   unsettle: { input: threadIdSchema, output: z.object({ ok: z.boolean() }) },
 });
@@ -141,6 +158,12 @@ export default function plugin(bb: BbPluginApi) {
       label: "Automatically name threads",
       description: "Name new threads and rename only when you start different work.",
       default: true,
+    },
+    paperclipCompanyId: {
+      type: "string",
+      label: "Paperclip company id",
+      description: "Company to show in the Paperclip sidebar tab. This must match the Paperclip bridge configuration.",
+      default: "592ddae9-bae3-4f9a-a69e-040d43b5f3a0",
     },
   });
   const threadNamer = createThreadNamer(bb, {
@@ -281,6 +304,24 @@ export default function plugin(bb: BbPluginApi) {
           ];
         }),
       };
+    },
+    async paperclipIssues({ projectId, query }) {
+      const { paperclipCompanyId } = await settings.get();
+      return bb.sdk.plugins.callRpc({
+        pluginId: "ordillect-paperclip-bridge",
+        method: "chatIssues",
+        input: { companyId: paperclipCompanyId, projectId, query, limit: 100 },
+        outputSchema: paperclipIssuesOutput,
+      });
+    },
+    async paperclipProjects() {
+      const { paperclipCompanyId } = await settings.get();
+      return bb.sdk.plugins.callRpc({
+        pluginId: "ordillect-paperclip-bridge",
+        method: "chatProjects",
+        input: { companyId: paperclipCompanyId },
+        outputSchema: paperclipProjectsOutput,
+      });
     },
     async unsettle({ threadId }) {
       try {

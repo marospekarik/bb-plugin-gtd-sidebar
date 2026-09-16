@@ -39,6 +39,17 @@ import { overlayForShelf } from "@/lib/thread-overlay";
 import type { ActiveThreadShelf } from "@/components/inbox/thread-actions";
 
 const ALL_PROJECTS = "__all__";
+const SIDEBAR_SOURCE_STORAGE_KEY = "gtd-sidebar:source";
+
+const PAPERCLIP_STATUS_TINT: Record<string, string> = {
+  backlog: "text-muted-foreground",
+  todo: "text-sky-500",
+  in_progress: "text-amber-500",
+  in_review: "text-violet-500",
+  blocked: "text-red-500",
+  done: "text-emerald-600",
+  cancelled: "text-muted-foreground",
+};
 
 const EMPTY_STATE_CLASS = "px-2 py-6 text-center text-xs text-muted-foreground";
 const GITBUTLER_REFRESH_MS = 30_000;
@@ -77,6 +88,21 @@ export function ThreadInbox({
     [providers],
   );
   const [scope, setScope] = useState<string>(ALL_PROJECTS);
+  const [source, setSource] = useState<"personal" | "paperclip">(() => {
+    try {
+      return sessionStorage.getItem(SIDEBAR_SOURCE_STORAGE_KEY) === "paperclip" ? "paperclip" : "personal";
+    } catch {
+      return "personal";
+    }
+  });
+  const selectSource = (next: "personal" | "paperclip") => {
+    setSource(next);
+    try {
+      sessionStorage.setItem(SIDEBAR_SOURCE_STORAGE_KEY, next);
+    } catch {
+      // Storage is only a continuity enhancement; the active control remains authoritative.
+    }
+  };
   // Read once here rather than per card, and compared against `false` rather
   // than coerced: `values` is undefined while the settings load, and the
   // setting is on by default, so anything that is not an explicit "off" draws
@@ -164,6 +190,26 @@ export function ThreadInbox({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <div className="mx-2 mb-1 mt-1 flex h-7 rounded-md bg-muted p-0.5 text-xs" role="tablist" aria-label="Sidebar source">
+        {(["personal", "paperclip"] as const).map((tab) => (
+          <button
+            key={tab}
+            role="tab"
+            aria-selected={source === tab}
+            onClick={() => selectSource(tab)}
+            className={cn(
+              "flex-1 rounded px-2 font-medium transition-colors",
+              source === tab ? "bg-background shadow-sm" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {tab === "personal" ? "Personal" : "Paperclip"}
+          </button>
+        ))}
+      </div>
+      {source === "paperclip" ? (
+        <PaperclipInbox onNavigate={onNavigate} />
+      ) : (
+        <>
       {/* The one control the host has no equivalent for. Everything else in
           the chrome above — New thread, search — is bb's and stays bb's. */}
       <div className="flex shrink-0 items-center gap-1 px-2 pb-0.5">
@@ -286,7 +332,75 @@ export function ThreadInbox({
           />
         </InboxContent>
       </div>
+        </>
+      )}
     </div>
+  );
+}
+
+function PaperclipInbox({ onNavigate }: Pick<PluginThreadListProps, "onNavigate">) {
+  const rpc = useRpc<typeof gtdSidebarRpcContract>();
+  const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
+  const [projectId, setProjectId] = useState<string>(ALL_PROJECTS);
+  const [query, setQuery] = useState("");
+  const [issues, setIssues] = useState<Array<{
+    id: string; identifier: string | null; title: string; status: string;
+    assigneeAgentName: string | null; live: boolean;
+  }>>([]);
+
+  useEffect(() => {
+    void rpc.call("paperclipProjects", {}).then((result) => setProjects(result.projects)).catch(() => setProjects([]));
+  }, [rpc]);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => void rpc
+      .call("paperclipIssues", { projectId: projectId === ALL_PROJECTS ? null : projectId, query })
+      .then((result) => { if (!cancelled) setIssues(result.issues); })
+      .catch(() => { if (!cancelled) setIssues([]); });
+    refresh();
+    const timer = setInterval(refresh, 15_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [rpc, projectId, query]);
+
+  return (
+    <>
+      <div className="flex shrink-0 items-center gap-1 px-2 pb-0.5">
+        <Select value={projectId} onValueChange={setProjectId}>
+          <SelectTrigger className="h-6 min-w-0 flex-1 border-0 border-transparent px-1.5 py-1 text-xs font-medium text-muted-foreground shadow-none hover:bg-sidebar-accent focus:ring-0" aria-label="Paperclip project scope">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_PROJECTS} className="text-xs">All projects</SelectItem>
+            {projects.map((project) => <SelectItem key={project.id} value={project.id} className="text-xs">{project.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="px-2 pb-1">
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter issues…" className="h-7 w-full rounded-md border border-input bg-transparent px-2 text-xs outline-none focus:ring-1 focus:ring-ring" />
+      </div>
+      <ul className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2" aria-label="Paperclip issues">
+        {issues.map((issue) => (
+          <li key={issue.id}>
+            <button onClick={() => {
+              // `toPluginPanel` is intentionally scoped to the calling plugin,
+              // so from GTD it would look for a GTD panel named "issue-chat".
+              // There is no cross-plugin SDK navigator yet. BB's router does
+              // observe popstate, so update the canonical route in-place and
+              // notify it rather than hard-reloading the whole application.
+              const href = `/plugins/ordillect-issue-chat/issue-chat/issue:${issue.id}`;
+              window.history.pushState(window.history.state, "", href);
+              window.dispatchEvent(new PopStateEvent("popstate"));
+              onNavigate();
+            }} className="w-full rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent">
+              <div className="flex items-center gap-1.5"><span className="font-mono text-[10px] text-muted-foreground">{issue.identifier ?? "—"}</span><span className={cn("font-mono text-[10px]", PAPERCLIP_STATUS_TINT[issue.status] ?? "text-muted-foreground")}>{issue.status}</span>{issue.live ? <span className="ml-auto size-1.5 animate-pulse rounded-full bg-amber-500" /> : null}</div>
+              <div className="truncate text-xs">{issue.title}</div>
+              {issue.assigneeAgentName ? <div className="truncate text-[10px] text-muted-foreground">{issue.assigneeAgentName}</div> : null}
+            </button>
+          </li>
+        ))}
+        {issues.length === 0 ? <li className={EMPTY_STATE_CLASS}>No issues in this project.</li> : null}
+      </ul>
+    </>
   );
 }
 
